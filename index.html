@@ -496,6 +496,41 @@ async function sendScore(phaseNum, score){
   }catch(err){ return false; }
 }
 
+// ===== LIVE UPDATING (throttled) =====
+// Fire an update after each answered question so the leaderboard climbs in real time,
+// but throttle so rapid answers don't hammer the Sheet (at most one send per LIVE_MIN_MS per team).
+const LIVE_MIN_MS = 4000;   // minimum gap between live sends
+let _liveTimer=null, _livePending=null, _liveLastSent=0;
+function sendLiveScore(phaseNum, score){
+  if(!syncOn()) return;
+  _livePending = {phaseNum, score};       // always remember the latest
+  const now = Date.now();
+  const since = now - _liveLastSent;
+  if(since >= LIVE_MIN_MS){
+    flushLive();                           // enough time passed -> send now
+  } else if(!_liveTimer){
+    _liveTimer = setTimeout(flushLive, LIVE_MIN_MS - since); // schedule the trailing send
+  }
+}
+function flushLive(){
+  if(_liveTimer){ clearTimeout(_liveTimer); _liveTimer=null; }
+  if(!_livePending) return;
+  const {phaseNum, score} = _livePending;
+  _livePending=null; _liveLastSent=Date.now();
+  // fire-and-forget; phase-end sendScore is the guaranteed checkpoint
+  sendScore(phaseNum, score);
+}
+// register the team on the board immediately at 0 pts (so everyone shows from the start)
+async function sendRegistration(){
+  if(!syncOn()) return;
+  try{
+    await fetch(SYNC_URL, {
+      method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body: JSON.stringify({ team:team.name, members:team.members.join(', '), phase:0, score:0 })
+    });
+  }catch(err){}
+}
+
 // poll the gate; calls onOpen() once the given gate value appears
 let _gatePoll=null;
 function waitForGate(targetGate, onOpen){
@@ -545,6 +580,7 @@ function submitTeam(){
   if(filled.length===0){err.textContent='// Error: members[] needs at least one name';err.classList.add('show');return;}
   err.classList.remove('show');
   team={name,members:filled,registeredAt:new Date().toISOString()};
+  sendRegistration(); // appear on the leaderboard at 0 pts right away
   document.getElementById('loginView').style.display='none';
   document.getElementById('stageView').style.display='block';
   document.getElementById('phasebar').style.display='flex';
@@ -812,6 +848,7 @@ function scoreP1Choice(chosen, correct){
   const ok=chosen===correct;
   p1answered[p1pos]={ok}; if(ok) scores.p1++;
   markResult(p1pos,ok);
+  sendLiveScore(1, scores.p1);
   const fb=document.getElementById('fb');
   fb.textContent=ok?'✓ correct':'✗ incorrect'; fb.className='feedback '+(ok?'ok':'no');
   updateP1Tel();
@@ -827,6 +864,7 @@ function answerP1RT(){
   p1answered[p1pos]={ok,val:ta.value}; if(ok) scores.p1++;
   ta.disabled=true; document.getElementById('subBtn').disabled=true; document.getElementById('subBtn').textContent='✓ LOCKED';
   markResult(p1pos,ok);
+  sendLiveScore(1, scores.p1);
   const fb=document.getElementById('fb'); fb.textContent=ok?'✓ correct':'✗ incorrect'; fb.className='feedback '+(ok?'ok':'no');
   updateP1Tel();
   setTimeout(nextP1,750);
@@ -902,7 +940,7 @@ function submitP2(){
   const fb=document.getElementById('fb');
   if(ok){
     p2ans[n]={correct:true,locked:true,val:ta.value,attempts:(p2ans[n]?p2ans[n].attempts:0)+1};
-    p2skip.delete(n); ta.disabled=true; scores.p2++;
+    p2skip.delete(n); ta.disabled=true; scores.p2++; sendLiveScore(2, scores.p2);
     const s=document.getElementById('p2sub'); s.disabled=true; s.textContent='✓ LOCKED';
     const sk=document.getElementById('p2skipBtn'); if(sk) sk.disabled=true;
     fb.textContent='✓ correct — locked'; fb.className='feedback ok';
@@ -988,7 +1026,7 @@ function verifyP3(){
   const broken=normCode(pr.broken);
   const ok = pasted===target || sameOutputHeuristic(pasted, pr);
   if(ok){
-    p3done[p3pos]={code:ta.value}; p3skip.delete(p3pos); ta.disabled=true; scores.p3+=pr.pts;
+    p3done[p3pos]={code:ta.value}; p3skip.delete(p3pos); ta.disabled=true; scores.p3+=pr.pts; sendLiveScore(3, scores.p3);
     const s=document.getElementById('p3sub'); s.disabled=true; s.textContent='✓ VERIFIED';
     fb.textContent='✓ exploit patched — +'+pr.pts+' pts'; fb.className='feedback ok';
     markResult(p3pos,true);
